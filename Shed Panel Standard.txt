@@ -1,0 +1,699 @@
+# =============================================================
+# WT32-SC01 - Home Assistant status panel  (320 x 480, portrait)
+#
+# Page 1: clock, battery volts + amps, garden temp, shed thermostat
+# Page 2: front door camera stills
+#
+# >>> FILL IN THE HARDWARE BLOCK BELOW BEFORE FLASHING <<<
+# =============================================================
+
+substitutions:
+  name: sc01-panel
+  friendly_name: Status Panel
+
+  # ---- Your entities ### CHANGE ME ----
+  sens_batt_v: sensor.totals_battery_voltage
+  sens_batt_a:   sensor.totals_battery_current
+  sens_garden:   sensor.garden_plant_sensor_temperature
+  climate_shed:  climate.shed
+  doorbell:      binary_sensor.front_door_visitor
+  camera_door:   camera.ds_7208hqhi_k10820181029ccwrc63996275wcvu_101
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+# -------------------------------------------------------------
+# HARDWARE - WT32-SC01 (ESP32-WROVER-B, ST7796 over SPI, FT6336U touch)
+#
+# If the display stays blank, the usual culprits are colour order
+# (swap bgr/rgb) and invert_colors.
+# -------------------------------------------------------------
+esp32:
+  board: esp-wrover-kit
+  framework:
+    type: esp-idf
+
+psram:
+  mode: quad
+  speed: 80MHz
+
+# ---- backlight on GPIO23 (ledc gives you dimming, not just on/off) ----
+output:
+  - platform: ledc
+    pin: GPIO23
+    id: out_backlight
+
+light:
+  - platform: monochromatic
+    name: "Backlight"
+    id: backlight
+    output: out_backlight
+    restore_mode: ALWAYS_ON
+
+# ---- display ----
+spi:
+  clk_pin: GPIO14
+  mosi_pin: GPIO13
+  miso_pin: GPIO12
+
+display:
+  - platform: ili9xxx
+    model: ST7796
+    id: my_display
+    cs_pin: GPIO15
+    dc_pin: GPIO21
+    reset_pin: GPIO22
+    dimensions:
+      width: 320
+      height: 480
+    color_order: bgr
+    invert_colors: false
+    auto_clear_enabled: false
+    update_interval: never
+
+# ---- capacitive touch ----
+i2c:
+  id: bus_touch
+  sda: GPIO18
+  scl: GPIO19
+  scan: true
+
+touchscreen:
+  - platform: ft63x6
+    id: my_touch
+    i2c_id: bus_touch
+    address: 0x38
+    display: my_display
+
+# -------------------------------------------------------------
+# Connectivity
+# -------------------------------------------------------------
+api:
+  encryption:
+    key: "+91fRcoALgsmx6nCBMzb5ekwDl8X942OI+5kTiYOTps="
+
+ota:
+  - platform: esphome
+    password: AstroAssistant76
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: sc01-panel Fallback Hotspot
+    password: "Zek4AUkoeBcD"
+
+captive_portal:
+
+logger:
+  level: WARN
+  logs:
+    online_image: WARN
+    http_request: WARN
+http_request:
+  verify_ssl: false
+  timeout: 15s
+  buffer_size_rx: 4096      # default is often too small for a JPEG
+
+# -------------------------------------------------------------
+# HLK-LD2410C mmWave presence sensor
+#
+#   LD2410C GND -> GND
+#   LD2410C TX  -> GPIO26  (ESP32 RX)
+#   LD2410C RX  -> GPIO27  (ESP32 TX)
+#
+# Avoid GPIO16/17 - the WROVER-B uses those for PSRAM.
+# GPIO34/35/36/39 are input-only: usable as RX, never as TX.
+#
+# The module's default baud is 256000. If you get no data at all,
+# it has probably been reconfigured - try 115200 or 9600.
+# -------------------------------------------------------------
+uart:
+  id: uart_radar
+  tx_pin: GPIO27
+  rx_pin: GPIO26
+  baud_rate: 256000
+  parity: NONE
+  stop_bits: 1
+
+ld2410:
+  uart_id: uart_radar
+  id: radar
+
+# -------------------------------------------------------------
+# Fonts - sized for a 320px wide panel
+# -------------------------------------------------------------
+font:
+  - file: "gfonts://Roboto"
+    id: f_clock
+    size: 52
+  - file: "gfonts://Roboto"
+    id: f_target
+    size: 42
+  - file: "gfonts://Roboto"
+    id: f_big
+    size: 32
+  - file: "gfonts://Roboto"
+    id: f_med
+    size: 19
+  - file: "gfonts://Roboto"
+    id: f_small
+    size: 14
+
+# -------------------------------------------------------------
+# Time
+# -------------------------------------------------------------
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time:
+      - seconds: 0
+        then:
+          - lvgl.label.update:
+              id: lbl_clock
+              text: !lambda 'return id(ha_time).now().strftime("%H:%M");'
+          - lvgl.label.update:
+              id: lbl_date
+              text: !lambda 'return id(ha_time).now().strftime("%a %d %b");'
+
+      # ---- night dimming ----
+      - hours: 23
+        minutes: 0
+        seconds: 0
+        then:
+          - lambda: 'id(is_night) = true;'
+          - light.turn_on:
+              id: backlight
+              brightness: 12%
+
+      - hours: 7
+        minutes: 0
+        seconds: 0
+        then:
+          - lambda: 'id(is_night) = false;'
+          - light.turn_on:
+              id: backlight
+              brightness: 100%
+
+globals:
+  - id: shed_target
+    type: float
+    restore_value: false
+    initial_value: '18.0'
+  - id: shed_min
+    type: float
+    restore_value: false
+    initial_value: '5.0'
+  - id: shed_max
+    type: float
+    restore_value: false
+    initial_value: '30.0'
+  - id: is_night
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+# -------------------------------------------------------------
+# Values from Home Assistant
+# -------------------------------------------------------------
+sensor:
+  # ---- radar detail, exposed to HA for tuning ----
+  - platform: ld2410
+    moving_distance:
+      name: "Moving distance"
+    still_distance:
+      name: "Still distance"
+    detection_distance:
+      name: "Detection distance"
+    moving_energy:
+      name: "Moving energy"
+    still_energy:
+      name: "Still energy"
+ 
+  - platform: homeassistant
+    id: s_batt_v
+    entity_id: ${sens_batt_v}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_batt_v
+          text: !lambda 'return str_sprintf("%.2f", x);'
+ 
+  - platform: homeassistant
+    id: s_batt_a
+    entity_id: ${sens_batt_a}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_batt_a
+          text: !lambda 'return str_sprintf("%.1f", x);'
+      # Negative = discharging, positive = charging
+      - lvgl.label.update:
+          id: lbl_batt_a_sub
+          text: !lambda 'return std::string(x < 0 ? "discharging" : "charging");'
+ 
+  - platform: homeassistant
+    id: s_garden
+    entity_id: ${sens_garden}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_garden
+          text: !lambda 'return str_sprintf("%.1f\u00B0C", x);'
+ 
+  - platform: homeassistant
+    id: s_shed_now
+    entity_id: ${climate_shed}
+    attribute: current_temperature
+    on_value:
+      - lvgl.label.update:
+          id: lbl_shed_now
+          text: !lambda 'return str_sprintf("now %.1f\u00B0", x);'
+ 
+  - platform: homeassistant
+    id: s_shed_min
+    entity_id: ${climate_shed}
+    attribute: min_temp
+    on_value:
+      - lambda: 'id(shed_min) = x;'
+ 
+  - platform: homeassistant
+    id: s_shed_max
+    entity_id: ${climate_shed}
+    attribute: max_temp
+    on_value:
+      - lambda: 'id(shed_max) = x;'
+ 
+  - platform: homeassistant
+    id: s_shed_target
+    entity_id: ${climate_shed}
+    attribute: temperature
+    on_value:
+      - lambda: 'id(shed_target) = x;'
+      - lvgl.label.update:
+          id: lbl_shed_target
+          text: !lambda 'return str_sprintf("%.1f\u00B0", x);'
+ 
+# Tune these from HA rather than reflashing each time
+number:
+  - platform: ld2410
+    timeout:
+      name: "Presence timeout"
+    max_move_distance_gate:
+      name: "Max move distance gate"
+    max_still_distance_gate:
+      name: "Max still distance gate"
+ 
+select:
+  - platform: ld2410
+    distance_resolution:
+      name: "Distance resolution"
+ 
+switch:
+  - platform: ld2410
+    engineering_mode:
+      name: "Engineering mode"
+    bluetooth:
+      name: "Radar bluetooth"
+ 
+button:
+  - platform: ld2410
+    restart:
+      name: "Restart radar"
+    query_params:
+      name: "Query radar params"
+ 
+text_sensor:
+  - platform: ld2410
+    version:
+      name: "Radar firmware"
+ 
+  - platform: homeassistant
+    id: s_shed_mode
+    entity_id: ${climate_shed}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_shed_mode
+          text: !lambda 'return x;'
+
+
+
+# -------------------------------------------------------------
+# Doorbell: wake the panel and jump to the camera
+# -------------------------------------------------------------
+binary_sensor:
+  - platform: homeassistant
+    id: s_doorbell
+    entity_id: ${doorbell}
+    on_press:
+      - light.turn_on:
+          id: backlight
+          brightness: 100%
+      - lvgl.page.show: page_cam
+      - lvgl.widget.update: {id: nav_home, state: {checked: false}}
+      - lvgl.widget.update: {id: nav_cam, state: {checked: true}}
+      - lambda: 'id(img_door)->update();'
+      - script.execute: restore_panel
+        
+  - platform: ld2410
+    has_target:
+      name: Presence
+    has_moving_target:
+      name: Moving Target
+    has_still_target:
+      name: Still Target
+      
+script:
+  # mode: restart means repeated doorbell presses keep pushing the
+  # timeout out rather than stacking up
+  - id: restore_panel
+    mode: restart
+    then:
+      - delay: 90s
+      - lvgl.page.show: page_home
+      - lvgl.widget.update: {id: nav_cam, state: {checked: false}}
+      - lvgl.widget.update: {id: nav_home, state: {checked: true}}
+      - if:
+          condition:
+            lambda: 'return id(is_night);'
+          then:
+            - light.turn_on:
+                id: backlight
+                brightness: 12%
+
+# -------------------------------------------------------------
+# Camera stills
+#
+# Point this at a PRE-RESIZED ~320x240 JPEG, not the raw camera feed.
+# go2rtc:  http://<ha>:1984/api/frame.jpeg?src=front_door&w=320
+# or a camera.snapshot automation writing into /config/www/
+# -------------------------------------------------------------
+image:
+  - platform: online_image
+    id: img_door
+    url: "http://192.168.1.25:1984/api/frame.jpeg?src=front_door&w=320"
+    format: JPEG
+    type: RGB565
+    update_interval: never
+    on_download_finished:
+      - lvgl.image.update:
+          id: cam_view
+          src: img_door
+    on_error:
+      - logger.log:
+          level: WARN
+          format: "Door snapshot failed"
+
+# Refresh only while the camera page is showing
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lvgl.page.is_showing: page_cam
+          then:
+            - lambda: 'id(img_door)->update();'
+
+# -------------------------------------------------------------
+# UI
+# -------------------------------------------------------------
+lvgl:
+  displays:
+    - my_display
+  touchscreens:
+    - my_touch
+  buffer_size: 25%
+
+  theme:
+    button:
+      bg_color: 0x232729
+      bg_opa: COVER
+      radius: 4
+      text_font: f_med
+      text_color: 0xE4E7E6
+      border_width: 0
+      pressed:
+        bg_color: 0x2E3336
+      checked:
+        bg_color: 0xFFB020
+        text_color: 0x1A1205
+
+  # Nav bar sits above both pages
+  top_layer:
+    widgets:
+      - button:
+          id: nav_home
+          x: 12
+          y: 412
+          width: 143
+          height: 56
+          checkable: true
+          state:
+            checked: true
+          widgets:
+            - label: {text: "Status", align: CENTER}
+          on_click:
+            - lvgl.page.show: page_home
+            - lvgl.widget.update: {id: nav_cam, state: {checked: false}}
+            - lvgl.widget.update: {id: nav_home, state: {checked: true}}
+
+      - button:
+          id: nav_cam
+          x: 165
+          y: 412
+          width: 143
+          height: 56
+          checkable: true
+          widgets:
+            - label: {text: "Door", align: CENTER}
+          on_click:
+            - lvgl.page.show: page_cam
+            - lambda: 'id(img_door)->update();'
+            - lvgl.widget.update: {id: nav_home, state: {checked: false}}
+            - lvgl.widget.update: {id: nav_cam, state: {checked: true}}
+
+  pages:
+    # =========================================================
+    # PAGE 1 - STATUS
+    # =========================================================
+    - id: page_home
+      bg_color: 0x121415
+      widgets:
+
+        # ---- clock ----
+        - label:
+            id: lbl_clock
+            text: "--:--"
+            text_font: f_clock
+            text_color: 0xFFFFFF
+            x: 14
+            y: 8
+        - label:
+            id: lbl_date
+            text: ""
+            text_font: f_small
+            text_color: 0x8B9295
+            x: 16
+            y: 66
+
+        # ---- battery: voltage ----
+        - obj:
+            x: 12
+            y: 96
+            width: 143
+            height: 92
+            bg_color: 0x1C1F21
+            border_width: 0
+            radius: 4
+            pad_all: 0
+            widgets:
+              - label:
+                  text: "BATTERY"
+                  text_font: f_small
+                  text_color: 0x8B9295
+                  x: 12
+                  y: 10
+              - label:
+                  id: lbl_batt_v
+                  text: "--"
+                  text_font: f_big
+                  text_color: 0x4FA8E8
+                  x: 12
+                  y: 34
+              - label:
+                  text: "V"
+                  text_font: f_small
+                  text_color: 0x8B9295
+                  x: 12
+                  y: 70
+
+        # ---- battery: current ----
+        - obj:
+            x: 165
+            y: 96
+            width: 143
+            height: 92
+            bg_color: 0x1C1F21
+            border_width: 0
+            radius: 4
+            pad_all: 0
+            widgets:
+              - label:
+                  text: "CURRENT"
+                  text_font: f_small
+                  text_color: 0x8B9295
+                  x: 12
+                  y: 10
+              - label:
+                  id: lbl_batt_a
+                  text: "--"
+                  text_font: f_big
+                  text_color: 0xFF9F43
+                  x: 12
+                  y: 34
+              - label:
+                  id: lbl_batt_a_sub
+                  text: "A"
+                  text_font: f_small
+                  text_color: 0x8B9295
+                  x: 12
+                  y: 70
+
+        # ---- garden temperature ----
+        - obj:
+            x: 12
+            y: 196
+            width: 296
+            height: 66
+            bg_color: 0x1C1F21
+            border_width: 0
+            radius: 4
+            pad_all: 0
+            widgets:
+              - label:
+                  text: "Garden"
+                  text_font: f_med
+                  text_color: 0x8B9295
+                  x: 14
+                  y: 20
+              - label:
+                  id: lbl_garden
+                  text: "--"
+                  text_font: f_big
+                  text_color: 0x5FD08C
+                  align: RIGHT_MID
+                  x: -14
+                  y: 0
+
+        # ---- shed thermostat ----
+        - obj:
+            x: 12
+            y: 270
+            width: 296
+            height: 126
+            bg_color: 0x1C1F21
+            border_width: 0
+            radius: 4
+            pad_all: 0
+            widgets:
+              - label:
+                  text: "Shed"
+                  text_font: f_small
+                  text_color: 0x8B9295
+                  x: 14
+                  y: 12
+              - label:
+                  id: lbl_shed_target
+                  text: "--"
+                  text_font: f_target
+                  text_color: 0xF2584D
+                  x: 14
+                  y: 32
+              - label:
+                  id: lbl_shed_now
+                  text: "now --"
+                  text_font: f_small
+                  text_color: 0x8B9295
+                  x: 16
+                  y: 92
+              - label:
+                  id: lbl_shed_mode
+                  text: "-"
+                  text_font: f_small
+                  text_color: 0xFFB020
+                  x: 96
+                  y: 92
+
+              - button:
+                  x: 168
+                  y: 26
+                  width: 56
+                  height: 84
+                  widgets:
+                    - label: {text: "-", text_font: f_big, align: CENTER}
+                  on_click:
+                    - lambda: |-
+                        float t = roundf((id(shed_target) - 0.5f) * 2.0f) / 2.0f;
+                        id(shed_target) = clamp(t, id(shed_min), id(shed_max));
+                    - lvgl.label.update:
+                        id: lbl_shed_target
+                        text: !lambda 'return str_sprintf("%.1f\u00B0", id(shed_target));'
+                    - homeassistant.action:
+                        action: climate.set_temperature
+                        data:
+                          entity_id: ${climate_shed}
+                        data_template:
+                          temperature: "{{ t }}"
+                        variables:
+                          t: !lambda 'return id(shed_target);'
+
+              - button:
+                  x: 232
+                  y: 26
+                  width: 56
+                  height: 84
+                  widgets:
+                    - label: {text: "+", text_font: f_big, align: CENTER}
+                  on_click:
+                    - lambda: |-
+                        float t = roundf((id(shed_target) + 0.5f) * 2.0f) / 2.0f;
+                        id(shed_target) = clamp(t, id(shed_min), id(shed_max));
+                    - lvgl.label.update:
+                        id: lbl_shed_target
+                        text: !lambda 'return str_sprintf("%.1f\u00B0", id(shed_target));'
+                    - homeassistant.action:
+                        action: climate.set_temperature
+                        data:
+                          entity_id: ${climate_shed}
+                        data_template:
+                          temperature: "{{ t }}"
+                        variables:
+                          t: !lambda 'return id(shed_target);'
+
+    # =========================================================
+    # PAGE 2 - FRONT DOOR CAMERA
+    # =========================================================
+    - id: page_cam
+      bg_color: 0x121415
+      widgets:
+        - label:
+            text: "Front door"
+            text_font: f_med
+            text_color: 0x8B9295
+            x: 14
+            y: 12
+
+        - image:
+            id: cam_view
+            src: img_door
+            x: 0
+            y: 46
+           
+
+        - button:
+            x: 12
+            y: 306
+            width: 296
+            height: 62
+            widgets:
+              - label: {text: "Refresh now", align: CENTER}
+            on_click:
+              - lambda: 'id(img_door)->update();'

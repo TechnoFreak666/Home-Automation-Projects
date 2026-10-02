@@ -1,0 +1,597 @@
+# =============================================================
+# Waveshare ESP32-S3-Touch-LCD-7 - Living Room Panel
+# PORTRAIT 480 x 800
+#
+# Pages: Scenes | AC | Door
+# (TV page removed)
+#
+# ROTATION WARNING
+# This is an RGB parallel panel - there is no hardware rotation,
+# so LVGL rotates in software. Small label updates are fine;
+# whole-page redraws will feel slow. If it is unusable, set
+# rotation back to 0 and use the landscape layout.
+# =============================================================
+ 
+substitutions:
+  name: living-wall-panel
+  friendly_name: Living Room Panel
+ 
+  # ---- Your entities ----
+  scene_normal:  scene.normal
+  scene_bright:  scene.bright
+  scene_dim:     scene.normal_duplicate
+  scene_cinema:  scene.cinema
+  scene_off:     scene.off
+  blinds:        switch.cinema_controler
+  good_night:    input_button.good_night
+  climate_ac:    climate.heat_pump_ir_heat_pump_ac
+  camera_door:   camera.front_door
+  sensor_temp:   sensor.living_room_sofa_am2301_temperature
+  sensor_hum:    sensor.living_room_sofa_am2301_humidity
+ 
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+ 
+packages:
+  waveshare: github://inytar/waveshare-esp32-s3-touch-lcd-7-esphome/waveshare-esp32-s3-touch-lcd-7.yaml@main
+
+api:
+  encryption:
+    key: "vBZwRilk0mJOvczXRSQsSqrUiL+NrzbpXNiHGr0qcDQ="
+
+ota:
+  - platform: esphome
+    encryption:
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: living-wall-pan Fallback Hotspot
+    password: "pBaBxLaFthpy"
+
+logger:
+  level: INFO
+
+# Needed for the camera snapshot on page 4
+http_request:
+  verify_ssl: false
+  timeout: 15s
+
+# -------------------------------------------------------------
+# Fonts
+# -------------------------------------------------------------
+font:
+  - file: "gfonts://Roboto"
+    id: f_xl
+    size: 52
+  - file: "gfonts://Roboto"
+    id: f_lg
+    size: 30
+  - file: "gfonts://Roboto"
+    id: f_md
+    size: 22
+  - file: "gfonts://Roboto"
+    id: f_sm
+    size: 16
+
+  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf"
+    id: f_icon
+    size: 42
+    bpp: 4
+    glyphs: [
+      "\U000F0335",  # lightbulb
+      "\U000F001B",  # air-conditioner
+      "\U000F07AE",  # cctv
+    ]
+
+# -------------------------------------------------------------
+# Time
+# -------------------------------------------------------------
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time:
+      - seconds: 0
+        then:
+          - lvgl.label.update:
+              id: lbl_clock
+              text: !lambda 'return id(ha_time).now().strftime("%H:%M");'
+
+globals:
+  - id: ac_target
+    type: float
+    restore_value: false
+    initial_value: '21.0'
+
+# -------------------------------------------------------------
+# Values from Home Assistant
+# -------------------------------------------------------------
+sensor:
+  - platform: homeassistant
+    id: s_temp
+    entity_id: ${sensor_temp}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_temp
+          text: !lambda 'return str_sprintf("%.1f\u00B0", x);'
+
+  - platform: homeassistant
+    id: s_hum
+    entity_id: ${sensor_hum}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_hum
+          text: !lambda 'return str_sprintf("%.0f%%", x);'
+
+  - platform: homeassistant
+    id: s_ac_current
+    entity_id: ${climate_ac}
+    attribute: current_temperature
+    on_value:
+      - lvgl.label.update:
+          id: lbl_ac_current
+          text: !lambda 'return str_sprintf("now %.1f\u00B0C", x);'
+
+  - platform: homeassistant
+    id: s_ac_target
+    entity_id: ${climate_ac}
+    attribute: temperature
+    on_value:
+      - lambda: 'id(ac_target) = x;'
+      - lvgl.label.update:
+          id: lbl_ac_target
+          text: !lambda 'return str_sprintf("%.0f\u00B0", x);'
+
+# Keep the blinds button in sync when switched elsewhere in HA
+binary_sensor:
+  - platform: homeassistant
+    id: s_blinds
+    entity_id: ${blinds}
+    on_state:
+      - lvgl.widget.update:
+          id: btn_blinds
+          state:
+            checked: !lambda 'return x;'
+
+text_sensor:
+  - platform: homeassistant
+    id: s_ac_mode
+    entity_id: ${climate_ac}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_ac_mode
+          text: !lambda 'return x;'
+
+# -------------------------------------------------------------
+# Front door camera
+#
+# Point this at a PRE-RESIZED image ~464px wide. go2rtc:
+#   http://<ha-ip>:1984/api/frame.jpeg?src=front_door&w=464
+# -------------------------------------------------------------
+image:
+  - platform: online_image
+    id: img_door
+    url: http://192.168.1.25:1984/api/frame.jpeg?src=front_door&w=464
+    format: JPEG
+    type: RGB565
+    update_interval: never
+    # Without this the widget keeps drawing the empty buffer it
+    # cached at boot, even though the download succeeds.
+    on_download_finished:
+      - lvgl.image.update:
+          id: cam_view
+          src: img_door
+    on_error:
+      - logger.log:
+          level: WARN
+          format: "Door snapshot failed"
+# Refresh the door snapshot only while the camera page is showing.
+# Fetch + decode blocks the main loop, so polling this on other
+# pages would make the whole UI feel sluggish for no benefit.
+interval:
+  - interval: 2s
+    then:
+      - if:
+          condition:
+            lvgl.page.is_showing: page_cam
+          then:
+            - lambda: 'id(img_door)->update();'
+
+# -------------------------------------------------------------
+# UI - 480 x 800 portrait
+# -------------------------------------------------------------
+lvgl:
+  # Software rotation - see the warning at the top of this file
+  rotation: 90
+
+  theme:
+    button:
+      bg_color: 0x232932
+      bg_opa: COVER
+      radius: 14
+      text_font: f_md
+      text_color: 0xE6E9ED
+      border_width: 0
+      checked:
+        bg_color: 0xE8B33A
+        text_color: 0x14181D
+      pressed:
+        bg_color: 0x39424F
+
+  # Header + nav bar float above every page
+  top_layer:
+    widgets:
+      - label:
+          id: lbl_clock
+          text: "--:--"
+          text_font: f_lg
+          text_color: 0xFFFFFF
+          align: TOP_LEFT
+          x: 20
+          y: 14
+          width: 140
+          text_align: LEFT
+
+      - label:
+          id: lbl_temp
+          text: "--"
+          text_font: f_md
+          text_color: 0xE6E9ED
+          align: TOP_RIGHT
+          x: -96
+          y: 20
+          width: 90
+          text_align: RIGHT
+
+      - label:
+          id: lbl_hum
+          text: "--"
+          text_font: f_md
+          text_color: 0x7E8794
+          align: TOP_RIGHT
+          x: -20
+          y: 20
+          width: 70
+          text_align: RIGHT
+
+      # ---- Nav bar (3 tabs) ----
+      - button:
+          id: nav_lights
+          x: 12
+          y: 726
+          width: 148
+          height: 62
+          checkable: true
+          state:
+            checked: true
+          widgets:
+            - label:
+                text: "\U000F0335"
+                text_font: f_icon
+                align: CENTER
+          on_click:
+            - lvgl.page.show: page_lights
+            - lvgl.widget.update: {id: nav_ac, state: {checked: false}}
+            - lvgl.widget.update: {id: nav_cam, state: {checked: false}}
+            - lvgl.widget.update: {id: nav_lights, state: {checked: true}}
+
+      - button:
+          id: nav_ac
+          x: 166
+          y: 726
+          width: 148
+          height: 62
+          checkable: true
+          widgets:
+            - label:
+                text: "\U000F001B"
+                text_font: f_icon
+                align: CENTER
+          on_click:
+            - lvgl.page.show: page_ac
+            - lvgl.widget.update: {id: nav_lights, state: {checked: false}}
+            - lvgl.widget.update: {id: nav_cam, state: {checked: false}}
+            - lvgl.widget.update: {id: nav_ac, state: {checked: true}}
+
+      - button:
+          id: nav_cam
+          x: 320
+          y: 726
+          width: 148
+          height: 62
+          checkable: true
+          widgets:
+            - label:
+                text: "\U000F07AE"
+                text_font: f_icon
+                align: CENTER
+          on_click:
+            - lvgl.page.show: page_cam
+            - lambda: 'id(img_door)->update();'
+            - lvgl.widget.update: {id: nav_lights, state: {checked: false}}
+            - lvgl.widget.update: {id: nav_ac, state: {checked: false}}
+            - lvgl.widget.update: {id: nav_cam, state: {checked: true}}
+
+  pages:
+    # =========================================================
+    # PAGE 1 - SCENES + BLINDS + GOOD NIGHT
+    # =========================================================
+    - id: page_lights
+      bg_color: 0x14181D
+      widgets:
+        - button:
+            id: s_normal
+            x: 18
+            y: 90
+            width: 216
+            height: 140
+            checkable: true
+            widgets:
+              - label: {text: "Normal", align: CENTER}
+            on_click:
+              - homeassistant.action:
+                  action: scene.turn_on
+                  data: {entity_id: "${scene_normal}"}
+              - lvgl.widget.update: {id: s_bright, state: {checked: false}}
+              - lvgl.widget.update: {id: s_dim, state: {checked: false}}
+              - lvgl.widget.update: {id: s_cinema, state: {checked: false}}
+              - lvgl.widget.update: {id: s_normal, state: {checked: true}}
+
+        - button:
+            id: s_bright
+            x: 246
+            y: 90
+            width: 216
+            height: 140
+            checkable: true
+            widgets:
+              - label: {text: "Bright", align: CENTER}
+            on_click:
+              - homeassistant.action:
+                  action: scene.turn_on
+                  data: {entity_id: "${scene_bright}"}
+              - lvgl.widget.update: {id: s_normal, state: {checked: false}}
+              - lvgl.widget.update: {id: s_dim, state: {checked: false}}
+              - lvgl.widget.update: {id: s_cinema, state: {checked: false}}
+              - lvgl.widget.update: {id: s_bright, state: {checked: true}}
+
+        - button:
+            id: s_dim
+            x: 18
+            y: 242
+            width: 216
+            height: 140
+            checkable: true
+            widgets:
+              - label: {text: "Dim", align: CENTER}
+            on_click:
+              - homeassistant.action:
+                  action: scene.turn_on
+                  data: {entity_id: "${scene_dim}"}
+              - lvgl.widget.update: {id: s_normal, state: {checked: false}}
+              - lvgl.widget.update: {id: s_bright, state: {checked: false}}
+              - lvgl.widget.update: {id: s_cinema, state: {checked: false}}
+              - lvgl.widget.update: {id: s_dim, state: {checked: true}}
+
+        - button:
+            id: s_cinema
+            x: 246
+            y: 242
+            width: 216
+            height: 140
+            checkable: true
+            widgets:
+              - label: {text: "Cinema", align: CENTER}
+            on_click:
+              - homeassistant.action:
+                  action: scene.turn_on
+                  data: {entity_id: "${scene_cinema}"}
+              - lvgl.widget.update: {id: s_normal, state: {checked: false}}
+              - lvgl.widget.update: {id: s_bright, state: {checked: false}}
+              - lvgl.widget.update: {id: s_dim, state: {checked: false}}
+              - lvgl.widget.update: {id: s_cinema, state: {checked: true}}
+
+        - button:
+            id: s_off
+            x: 18
+            y: 394
+            width: 444
+            height: 100
+            widgets:
+              - label: {text: "All off", align: CENTER}
+            on_click:
+              - homeassistant.action:
+                  action: scene.turn_on
+                  data: {entity_id: "${scene_off}"}
+              - lvgl.widget.update: {id: s_normal, state: {checked: false}}
+              - lvgl.widget.update: {id: s_bright, state: {checked: false}}
+              - lvgl.widget.update: {id: s_dim, state: {checked: false}}
+              - lvgl.widget.update: {id: s_cinema, state: {checked: false}}
+
+        # ---- blinds: a real toggle, state synced from HA ----
+        - button:
+            id: btn_blinds
+            x: 18
+            y: 510
+            width: 216
+            height: 120
+            checkable: true
+            widgets:
+              - label: {text: "Blinds", align: CENTER}
+            on_click:
+              - homeassistant.action:
+                  action: switch.toggle
+                  data: {entity_id: "${blinds}"}
+
+        # ---- good night: momentary press ----
+        - button:
+            id: btn_goodnight
+            x: 246
+            y: 510
+            width: 216
+            height: 120
+            widgets:
+              - label: {text: "Good night", align: CENTER}
+            on_click:
+              - homeassistant.action:
+                  action: input_button.press
+                  data: {entity_id: "${good_night}"}
+
+    # =========================================================
+    # PAGE 2 - AC / CLIMATE  (now with Heat)
+    # =========================================================
+    - id: page_ac
+      bg_color: 0x14181D
+      widgets:
+        # ---- setpoint row:  [-]   24°   [+]  ----
+        - button:
+            x: 18
+            y: 92
+            width: 110
+            height: 130
+            widgets: [{label: {text: "-", text_font: f_xl, align: CENTER}}]
+            on_click:
+              - lambda: 'id(ac_target) -= 1.0;'
+              - lvgl.label.update:
+                  id: lbl_ac_target
+                  text: !lambda 'return str_sprintf("%.0f\u00B0", id(ac_target));'
+              - homeassistant.action:
+                  action: climate.set_temperature
+                  data: {entity_id: "${climate_ac}"}
+                  data_template: {temperature: "{{ t }}"}
+                  variables:
+                    t: !lambda 'return id(ac_target);'
+
+        - label:
+            id: lbl_ac_target
+            text: "--"
+            text_font: f_xl
+            text_color: 0xFFFFFF
+            x: 134
+            y: 120
+            width: 214
+            text_align: CENTER
+
+        - button:
+            x: 352
+            y: 92
+            width: 110
+            height: 130
+            widgets: [{label: {text: "+", text_font: f_xl, align: CENTER}}]
+            on_click:
+              - lambda: 'id(ac_target) += 1.0;'
+              - lvgl.label.update:
+                  id: lbl_ac_target
+                  text: !lambda 'return str_sprintf("%.0f\u00B0", id(ac_target));'
+              - homeassistant.action:
+                  action: climate.set_temperature
+                  data: {entity_id: "${climate_ac}"}
+                  data_template: {temperature: "{{ t }}"}
+                  variables:
+                    t: !lambda 'return id(ac_target);'
+
+        # ---- current temp + mode, centred under the setpoint ----
+        - label:
+            id: lbl_ac_current
+            text: "now --"
+            text_font: f_md
+            text_color: 0x7E8794
+            x: 18
+            y: 238
+            width: 444
+            text_align: CENTER
+        - label:
+            id: lbl_ac_mode
+            text: "-"
+            text_font: f_md
+            text_color: 0xE8B33A
+            x: 18
+            y: 272
+            width: 444
+            text_align: CENTER
+
+        # ---- modes: Cool / Heat / Fan only / Off ----
+        - button:
+            x: 18
+            y: 326
+            width: 216
+            height: 96
+            widgets: [{label: {text: "Cool", align: CENTER}}]
+            on_click:
+              - homeassistant.action:
+                  action: climate.set_hvac_mode
+                  data: {entity_id: "${climate_ac}", hvac_mode: "cool"}
+
+        - button:
+            x: 246
+            y: 326
+            width: 216
+            height: 96
+            widgets: [{label: {text: "Heat", align: CENTER}}]
+            on_click:
+              - homeassistant.action:
+                  action: climate.set_hvac_mode
+                  data: {entity_id: "${climate_ac}", hvac_mode: "heat"}
+
+        - button:
+            x: 18
+            y: 434
+            width: 216
+            height: 96
+            widgets: [{label: {text: "Fan only", align: CENTER}}]
+            on_click:
+              - homeassistant.action:
+                  action: climate.set_hvac_mode
+                  data: {entity_id: "${climate_ac}", hvac_mode: "fan_only"}
+
+        - button:
+            x: 246
+            y: 434
+            width: 216
+            height: 96
+            widgets: [{label: {text: "Off", align: CENTER}}]
+            on_click:
+              - homeassistant.action:
+                  action: climate.set_hvac_mode
+                  data: {entity_id: "${climate_ac}", hvac_mode: "off"}
+
+    # =========================================================
+    # PAGE 3 - FRONT DOOR CAMERA
+    # =========================================================
+    - id: page_cam
+      bg_color: 0x14181D
+      widgets:
+        - label:
+            text: "Front door"
+            text_font: f_md
+            text_color: 0x7E8794
+            x: 20
+            y: 70
+
+        - image:
+            id: cam_view
+            src: img_door
+            x: 8
+            y: 110
+
+        - button:
+            x: 18
+            y: 430
+            width: 216
+            height: 96
+            widgets: [{label: {text: "Refresh", align: CENTER}}]
+            on_click:
+              - lambda: 'id(img_door)->update();'
+
+        - button:
+            x: 246
+            y: 430
+            width: 216
+            height: 96
+            widgets: [{label: {text: "Unlock", align: CENTER}}]
+            on_click:
+              - homeassistant.action:
+                  action: lock.open
+                  data: {entity_id: switch.smart_relay_wc_door_unlock}   ### CHANGE ME or delete
