@@ -17,7 +17,7 @@ substitutions:
   sens_garden:   sensor.garden_plant_sensor_temperature
   climate_shed:  climate.shed
   doorbell:      binary_sensor.front_door_visitor
-  camera_door:   camera.ds_7208hqhi_k10820181029ccwrc63996275wcvu_101
+  camera_door:   camera.ds_7208hqhi_xxxxxxxxxxxxxxx_101
 
 esphome:
   name: ${name}
@@ -91,18 +91,18 @@ touchscreen:
 # -------------------------------------------------------------
 api:
   encryption:
-    key: "+91fRcoALgsmx6nCBMzb5ekwDl8X942OI+5kTiYOTps="
+    key: "******************************************"
 
 ota:
   - platform: esphome
-    password: AstroAssistant76
+    password: ******************
 
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   ap:
     ssid: sc01-panel Fallback Hotspot
-    password: "Zek4AUkoeBcD"
+    password: "***************"
 
 captive_portal:
 
@@ -389,7 +389,7 @@ script:
 image:
   - platform: online_image
     id: img_door
-    url: "http://192.168.1.25:1984/api/frame.jpeg?src=front_door&w=320"
+    url: "http://192.xx.xx.xx:1984/api/frame.jpeg?src=front_door&w=320"
     format: JPEG
     type: RGB565
     update_interval: never
