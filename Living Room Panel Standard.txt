@@ -38,7 +38,7 @@ packages:
 
 api:
   encryption:
-    key: "vBZwRilk0mJOvczXRSQsSqrUiL+NrzbpXNiHGr0qcDQ="
+    key: "******************************************"
 
 ota:
   - platform: esphome
@@ -49,7 +49,7 @@ wifi:
   password: !secret wifi_password
   ap:
     ssid: living-wall-pan Fallback Hotspot
-    password: "pBaBxLaFthpy"
+    password: "*********"
 
 logger:
   level: INFO
@@ -173,7 +173,7 @@ text_sensor:
 image:
   - platform: online_image
     id: img_door
-    url: http://192.168.1.25:1984/api/frame.jpeg?src=front_door&w=464
+    url: http://IP:1984/api/frame.jpeg?src=front_door&w=464
     format: JPEG
     type: RGB565
     update_interval: never
